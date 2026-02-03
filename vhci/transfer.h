@@ -33,6 +33,15 @@ struct bce_vhci_transfer_queue {
     struct mutex pause_lock;
     struct list_head giveback_urb_list;
 
+    /*
+     * Suspend/resume fix: Track pending output submissions to avoid destroying
+     * queues while DMA transfers are still in flight. The wait queue allows
+     * bce_vhci_transfer_queue_do_pause() to block until all pending output
+     * completions have been processed, preventing use-after-free during suspend.
+     */
+    wait_queue_head_t sq_out_wait_queue;
+    atomic_t sq_out_pending;
+
     struct work_struct w_reset;
 };
 enum bce_vhci_urb_state {

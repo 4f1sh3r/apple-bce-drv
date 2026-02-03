@@ -282,9 +282,16 @@ static void bce_vhci_free_device(struct usb_hcd *hcd, struct usb_device *udev)
         if (dev->tq_mask & BIT(i)) {
             bce_vhci_transfer_queue_pause(&dev->tq[i], BCE_VHCI_PAUSE_SHUTDOWN);
             bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, (u8) i);
+            /*
+             * Suspend/resume fix: Clear hcpriv BEFORE destroying the queue
+             * to prevent use-after-free if URB operations occur during teardown.
+             */
+            if (dev->tq[i].endp)
+                dev->tq[i].endp->hcpriv = NULL;
             bce_vhci_destroy_transfer_queue(vhci, &dev->tq[i]);
         }
     }
+    dev->tq_mask = 0; /* Mark all queues as freed */
     vhci->devices[devid] = NULL;
     vhci->port_to_device[udev->portnum] = 0;
     bce_vhci_cmd_device_destroy(&vhci->cq, devid);
@@ -308,6 +315,12 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
             if (dev->tq_mask & BIT(i)) {
                 bce_vhci_transfer_queue_pause(&dev->tq[i], BCE_VHCI_PAUSE_SHUTDOWN);
                 bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, (u8) i);
+                /*
+                 * Suspend/resume fix: Clear hcpriv BEFORE destroying the queue
+                 * to prevent use-after-free if URB operations occur during reset.
+                 */
+                if (dev->tq[i].endp)
+                    dev->tq[i].endp->hcpriv = NULL;
                 bce_vhci_destroy_transfer_queue(vhci, &dev->tq[i]);
             }
         }
@@ -329,6 +342,8 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
                 if (i == 0)
                     dir = DMA_BIDIRECTIONAL;
                 bce_vhci_create_transfer_queue(vhci, &dev->tq[i], dev->tq[i].endp, devid, dir);
+                /* Restore hcpriv after recreating the queue */
+                dev->tq[i].endp->hcpriv = &dev->tq[i];
                 bce_vhci_cmd_endpoint_create(&vhci->cq, devid, &dev->tq[i].endp->desc);
             }
         }
@@ -408,6 +423,12 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
             continue;
         bce_vhci_cmd_port_resume(&vhci->cq, i);
     }
+    /*
+     * Suspend/resume fix: Give the T2 chip time to stabilize after port
+     * resume before resuming endpoints. Without this delay, endpoint
+     * resume commands may fail or cause instability.
+     */
+    msleep(500);
     pr_info("bce_vhci: resume endpoints\n");
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
@@ -487,10 +508,21 @@ static int bce_vhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, 
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
     bce_vhci_device_t devid = vhci->port_to_device[udev->portnum];
     struct bce_vhci_transfer_queue *q = endp->hcpriv;
-    struct bce_vhci_device *vdev = vhci->devices[devid];
+    struct bce_vhci_device *vdev;
     pr_info("bce_vhci_drop_endpoint %x:%x\n", udev->portnum, endp_index);
+
+    /*
+     * Suspend/resume fix: Device may have been freed during reset.
+     * Check validity before accessing device structures.
+     */
+    if (!devid || !vhci->devices[devid]) {
+        endp->hcpriv = NULL;
+        return 0;
+    }
+    vdev = vhci->devices[devid];
+
     if (!q) {
-        if (vdev && vdev->tq_mask & BIT(endp_index)) {
+        if (vdev->tq_mask & BIT(endp_index)) {
             pr_err("something deleted the hcpriv?\n");
             q = &vdev->tq[endp_index];
         } else {
@@ -499,8 +531,9 @@ static int bce_vhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, 
     }
 
     bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, (u8) (endp->desc.bEndpointAddress & 0x8Fu));
-    vhci->devices[devid]->tq_mask &= ~BIT(endp_index);
+    vdev->tq_mask &= ~BIT(endp_index);
     bce_vhci_destroy_transfer_queue(vhci, q);
+    endp->hcpriv = NULL;
     return 0;
 }
 
