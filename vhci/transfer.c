@@ -22,6 +22,9 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     INIT_LIST_HEAD(&q->giveback_urb_list);
     spin_lock_init(&q->urb_lock);
     mutex_init(&q->pause_lock);
+    /* Initialize pending output tracking for safe suspend/resume */
+    init_waitqueue_head(&q->sq_out_wait_queue);
+    atomic_set(&q->sq_out_pending, 0);
     q->vhci = vhci;
     q->endp = endp;
     q->dev_addr = dev_addr;
@@ -130,6 +133,14 @@ void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce
     struct bce_vhci_urb *turb;
     struct urb *urb;
     spin_lock_irqsave(&q->urb_lock, flags);
+
+    /*
+     * Suspend/resume fix: Skip events on inactive queues. During pause/unbind,
+     * the T2 chip may still send events for endpoints being torn down.
+     */
+    if (!q->active)
+        goto complete;
+
     bce_vhci_transfer_queue_deliver_pending(q);
 
     if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST &&
@@ -160,20 +171,31 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
     struct bce_sq_completion_data *c;
     struct urb *urb;
     struct bce_vhci_transfer_queue *q = sq->userdata;
+    bool is_sq_out = (sq == q->sq_out);
     spin_lock_irqsave(&q->urb_lock, flags);
     while ((c = bce_next_completion(sq))) {
+        /*
+         * Suspend/resume fix: Track output completion to allow pause to wait
+         * for all pending DMA transfers before destroying the queue.
+         */
         if (c->status == BCE_COMPLETION_ABORTED) { /* We flushed the queue */
             pr_debug("bce-vhci: [%02x] Got an abort completion\n", q->endp_addr);
+            if (is_sq_out && atomic_dec_and_test(&q->sq_out_pending))
+                wake_up(&q->sq_out_wait_queue);
             bce_notify_submission_complete(sq);
             continue;
         }
         if (list_empty(&q->endp->urb_list)) {
             pr_err("bce-vhci: [%02x] Got a completion while no requests are pending\n", q->endp_addr);
+            if (is_sq_out && atomic_dec_and_test(&q->sq_out_pending))
+                wake_up(&q->sq_out_wait_queue);
             continue;
         }
         pr_debug("bce-vhci: [%02x] Got a transfer queue completion\n", q->endp_addr);
         urb = list_first_entry(&q->endp->urb_list, struct urb, urb_list);
         bce_vhci_urb_transfer_completion(urb->hcpriv, c);
+        if (is_sq_out && atomic_dec_and_test(&q->sq_out_pending))
+            wake_up(&q->sq_out_wait_queue);
         bce_notify_submission_complete(sq);
     }
     bce_vhci_transfer_queue_deliver_pending(q);
@@ -181,27 +203,51 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
     bce_vhci_transfer_queue_giveback(q);
 }
 
+/* Timeout for waiting on pending output requests during pause */
+#define BCE_VHCI_PAUSE_TIMEOUT_MS 5000
+
 int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
 {
     unsigned long flags;
     int status;
+    int pending;
+    long timeout;
     u8 endp_addr = (u8) (q->endp->desc.bEndpointAddress & 0x8F);
+
     spin_lock_irqsave(&q->urb_lock, flags);
     q->active = false;
     spin_unlock_irqrestore(&q->urb_lock, flags);
-    if (q->sq_out) {
-        pr_err("bce-vhci: Not implemented: wait for pending output requests\n");
-    }
     bce_vhci_transfer_queue_remove_pending(q);
+
     if ((status = bce_vhci_cmd_endpoint_set_state(
             &q->vhci->cq, q->dev_addr, endp_addr, BCE_VHCI_ENDPOINT_PAUSED, &q->state)))
         return status;
     if (q->state != BCE_VHCI_ENDPOINT_PAUSED)
         return -EINVAL;
+
     if (q->sq_in)
         bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, (u16) q->sq_in->qid);
-    if (q->sq_out)
+
+    if (q->sq_out) {
         bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, (u16) q->sq_out->qid);
+        /*
+         * Suspend/resume fix: Wait for all pending output DMA transfers to
+         * complete before returning. This prevents use-after-free when the
+         * queue is destroyed while transfers are still in flight.
+         */
+        pending = atomic_read(&q->sq_out_pending);
+        if (pending > 0) {
+            timeout = wait_event_timeout(q->sq_out_wait_queue,
+                    atomic_read(&q->sq_out_pending) == 0,
+                    msecs_to_jiffies(BCE_VHCI_PAUSE_TIMEOUT_MS));
+            if (timeout == 0) {
+                pending = atomic_read(&q->sq_out_pending);
+                if (pending > 0)
+                    pr_warn("bce-vhci: [%02x] Timeout waiting for %d pending output requests\n",
+                            q->endp_addr, pending);
+            }
+        }
+    }
     return 0;
 }
 
@@ -214,11 +260,13 @@ int bce_vhci_transfer_queue_do_resume(struct bce_vhci_transfer_queue *q)
     struct urb *urb, *urbt;
     struct bce_vhci_urb *vurb;
     u8 endp_addr = (u8) (q->endp->desc.bEndpointAddress & 0x8F);
+
     if ((status = bce_vhci_cmd_endpoint_set_state(
             &q->vhci->cq, q->dev_addr, endp_addr, BCE_VHCI_ENDPOINT_ACTIVE, &q->state)))
         return status;
     if (q->state != BCE_VHCI_ENDPOINT_ACTIVE)
         return -EINVAL;
+
     spin_lock_irqsave(&q->urb_lock, flags);
     q->active = true;
     list_for_each_entry_safe(urb, urbt, &q->endp->urb_list, urb_list) {
@@ -512,6 +560,8 @@ static int bce_vhci_urb_send_out_data(struct bce_vhci_urb *urb, dma_addr_t addr,
 
     s = bce_next_submission(urb->q->sq_out);
     bce_set_submission_single(s, addr, size);
+    /* Track pending output for safe pause - decremented in completion handler */
+    atomic_inc(&urb->q->sq_out_pending);
     bce_submit_to_device(urb->q->sq_out);
     return 0;
 }
