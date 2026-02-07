@@ -250,18 +250,28 @@ static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct b
         return NULL;
 
     spin_lock(&cmdq->lck);
+    res->slot = cmdq->sq->tail;
     cmdq->tres[cmdq->sq->tail] = res;
     ret = bce_next_submission(cmdq->sq);
     return ret;
 }
 
-static __always_inline void bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bce_queue_cmdq_result_el *res)
+static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bce_queue_cmdq_result_el *res)
 {
     bce_submit_to_device(cmdq->sq);
     spin_unlock(&cmdq->lck);
 
-    wait_for_completion(&res->cmpl);
+    if (!wait_for_completion_timeout(&res->cmpl, msecs_to_jiffies(5000))) {
+        pr_err("apple-bce: command queue timeout\n");
+        spin_lock(&cmdq->lck);
+        cmdq->tres[res->slot] = NULL;
+        spin_unlock(&cmdq->lck);
+        /* Reclaim the slot: advance head and wake any waiters */
+        bce_notify_submission_complete(cmdq->sq);
+        return -ETIMEDOUT;
+    }
     mb();
+    return 0;
 }
 
 u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, bool isdirout)
@@ -285,7 +295,8 @@ u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg 
     cmd->addr = cfg->addr;
     cmd->length = cfg->length;
 
-    bce_cmd_finish(cmdq, &res);
+    if (bce_cmd_finish(cmdq, &res))
+        return (u32) -1;
     return res.status;
 }
 
@@ -298,7 +309,8 @@ u32 bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
     cmd->cmd = BCE_CMD_UNREGISTER_MEMORY_QUEUE;
     cmd->flags = 0;
     cmd->qid = qid;
-    bce_cmd_finish(cmdq, &res);
+    if (bce_cmd_finish(cmdq, &res))
+        return (u32) -1;
     return res.status;
 }
 
@@ -311,7 +323,8 @@ u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
     cmd->cmd = BCE_CMD_FLUSH_MEMORY_QUEUE;
     cmd->flags = 0;
     cmd->qid = qid;
-    bce_cmd_finish(cmdq, &res);
+    if (bce_cmd_finish(cmdq, &res))
+        return (u32) -1;
     return res.status;
 }
 
