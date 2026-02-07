@@ -112,20 +112,7 @@ void bce_vhci_stop(struct usb_hcd *hcd)
 
 static int bce_vhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 {
-    struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
-    unsigned long mask = READ_ONCE(vhci->port_resume_mask);
-    int i, ret_len;
-
-    if (!mask)
-        return 0;
-
-    ret_len = (vhci->port_count + 8) / 8;
-    memset(buf, 0, ret_len);
-    for (i = 1; i <= vhci->port_count; i++) {
-        if (test_bit(i, &vhci->port_resume_mask))
-            buf[i / 8] |= BIT(i % 8);
-    }
-    return ret_len;
+    return 0;
 }
 
 static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout);
@@ -182,8 +169,6 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
 
         if (port_status & 0x40000)
             ps->wPortChange |= USB_PORT_STAT_C_CONNECTION;
-        if (test_bit(wIndex, &vhci->port_resume_mask))
-            ps->wPortChange |= USB_PORT_STAT_C_CONNECTION;
 
         pr_debug("bce-vhci: Translated status %x to %x:%x\n", port_status, ps->wPortStatus, ps->wPortChange);
         return 0;
@@ -212,10 +197,8 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
                 vhci->port_power_mask &= ~BIT(wIndex);
             return status;
         }
-        if (wValue == USB_PORT_FEAT_C_CONNECTION) {
-            clear_bit(wIndex, &vhci->port_resume_mask);
+        if (wValue == USB_PORT_FEAT_C_CONNECTION)
             return bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0x40000, &port_status);
-        }
         if (wValue == USB_PORT_FEAT_C_RESET) { /* I don't think I can transfer it in any way */
             return 0;
         }
@@ -384,7 +367,6 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     pr_info("bce_vhci: suspend started\n");
 
     bce_vhci_debug_port_status(vhci, "pre-suspend");
-    WRITE_ONCE(vhci->port_resume_mask, 0);
 
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
@@ -735,44 +717,11 @@ static void bce_vhci_firmware_event_completion(struct bce_queue_sq *sq)
 
 static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct bce_vhci_message *msg)
 {
-    struct usb_hcd *hcd = q->vhci->hcd;
-    u8 port;
-
     if (msg->cmd & 0x8000) {
         bce_vhci_command_queue_deliver_completion(&q->vhci->cq, msg);
-        return;
-    }
-
-    switch (msg->cmd) {
-    case BCE_VHCI_CMD_PORT_CONNECT:
-        /*
-         * T2 notifies us that a port connection state changed.
-         * This happens during boot and resume. Mark the port as changed
-         * so hub_status_data reports it, then notify USB core to poll.
-         */
-        port = (u8)(msg->param1 & 0xff);
-        pr_info("bce-vhci: port %d connect notification (status=0x%llx)\n", port, msg->param2);
-        set_bit(port, &q->vhci->port_resume_mask);
-        if (hcd)
-            usb_hcd_poll_rh_status(hcd);
-        break;
-
-    case BCE_VHCI_CMD_PORT_RESUME:
-        port = (u8)(msg->param1 & 0xff);
-        pr_info("bce-vhci: T2 initiated port %d resume (status=0x%llx)\n", port, msg->param2);
-        if (hcd)
-            usb_hcd_poll_rh_status(hcd);
-        break;
-
-    case BCE_VHCI_CMD_PORT_SUSPEND:
-        port = (u8)(msg->param1 & 0xff);
-        pr_info("bce-vhci: T2 initiated port %d suspend (status=0x%llx)\n", port, msg->param2);
-        break;
-
-    default:
+    } else {
         pr_warn("bce-vhci: Unhandled system event: %x s=%x p1=%x p2=%llx\n",
                 msg->cmd, msg->status, msg->param1, msg->param2);
-        break;
     }
 }
 

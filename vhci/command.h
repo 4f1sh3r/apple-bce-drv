@@ -27,7 +27,6 @@ enum bce_vhci_command {
     BCE_VHCI_CMD_PORT_RESET = 0x14,
     BCE_VHCI_CMD_PORT_DISABLE = 0x15,
     BCE_VHCI_CMD_PORT_STATUS = 0x16,
-    BCE_VHCI_CMD_PORT_CONNECT = 0x18,   /* Undocumented - port connection notification from T2 */
 
     BCE_VHCI_CMD_DEVICE_CREATE = 0x30,
     BCE_VHCI_CMD_DEVICE_DESTROY = 0x31,
