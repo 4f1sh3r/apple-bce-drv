@@ -186,8 +186,6 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
 
         if (port_status & 0x40000)
             ps->wPortChange |= USB_PORT_STAT_C_CONNECTION;
-        if (test_bit(wIndex, &vhci->port_resume_mask))
-            ps->wPortChange |= USB_PORT_STAT_C_CONNECTION;
 
         pr_debug("bce-vhci: Translated status %x to %x:%x\n", port_status, ps->wPortStatus, ps->wPortChange);
         return 0;
@@ -216,10 +214,8 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
                 vhci->port_power_mask &= ~BIT(wIndex);
             return status;
         }
-        if (wValue == USB_PORT_FEAT_C_CONNECTION) {
-            clear_bit(wIndex, &vhci->port_resume_mask);
+        if (wValue == USB_PORT_FEAT_C_CONNECTION)
             return bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0x40000, &port_status);
-        }
         if (wValue == USB_PORT_FEAT_C_RESET) { /* I don't think I can transfer it in any way */
             return 0;
         }
@@ -388,7 +384,6 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     pr_info("bce_vhci: suspend started\n");
 
     bce_vhci_debug_port_status(vhci, "pre-suspend");
-    WRITE_ONCE(vhci->port_resume_mask, 0);
 
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
@@ -760,7 +755,6 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
     } else {
         pr_warn("bce-vhci: Unhandled system event: %x s=%x p1=%x p2=%llx\n",
                 msg->cmd, msg->status, msg->param1, msg->param2);
-        break;
     }
 }
 
