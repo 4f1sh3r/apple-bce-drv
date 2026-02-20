@@ -103,6 +103,14 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     bce_vhci_create(bce, &bce->vhci);
 
+    /* The T2 chip requires function 0 (NVMe) to be a bus master for DMA
+     * on our function. Create a device link for runtime PM ordering.
+     * (System S3 ordering is already handled by PCI function numbering.) */
+    bce->pci0_link = device_link_add(&dev->dev, &bce->pci0->dev,
+                                     DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
+    if (!bce->pci0_link)
+        dev_warn(&dev->dev, "apple-bce: failed to create device link to function 0\n");
+
     return 0;
 
 fail_ts:
@@ -243,6 +251,9 @@ static void apple_bce_remove(struct pci_dev *dev)
 
     bce_vhci_destroy(&bce->vhci);
 
+    if (bce->pci0_link)
+        device_link_del(bce->pci0_link);
+
     bce_timestamp_stop(&bce->timestamp);
 #ifndef WITHOUT_NVME_PATCH
     pci_disable_device(bce->pci0);
@@ -356,6 +367,24 @@ static int apple_bce_resume(struct device *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
     int status;
+    int i;
+    u16 vid;
+
+    /* Wait for T2 PCIe link to re-train after S3.
+     * MMIO to the T2 BARs will hang the CPU if the link is down.
+     * Config space reads go through the root port and return 0xFFFF safely.
+     * Poll aggressively first (link usually retrains in ~100-200ms),
+     * then back off to 50ms intervals. */
+    for (i = 0; i < 120; i++) {
+        pci_read_config_word(bce->pci, PCI_VENDOR_ID, &vid);
+        if (vid == PCI_VENDOR_ID_APPLE)
+            break;
+        msleep(i < 40 ? 5 : 50);
+    }
+    if (vid != PCI_VENDOR_ID_APPLE) {
+        pr_err("apple-bce: resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
+        return -ENODEV;
+    }
 
     pci_set_master(bce->pci);
     pci_set_master(bce->pci0);
