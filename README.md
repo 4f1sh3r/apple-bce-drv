@@ -1,11 +1,12 @@
 ## Personal testing fork
 This fork is currently maintained for personal testing only.
 
-It integrates both patch sets:
+It integrates these patch sets:
 - `klizas/aur`
 - `craigds/fix-vhci-port-change-notification` (including merged `AdityaGarg8` updates)
+- `clanoftheducks/clanoftheducks-aaudio-patch1`
 
-Current status on my system: S3 suspend/resume appears to work reliably for me.
+Current status on my system: S3 suspend/resume appears to work (almost) reliably for me. I got a "desync" error once in ~40 suspend/resume cycles.
 
 Test system:
 - Host: MacBook Pro 16,2 A2251 (13-inch, 2020, Four Thunderbolt 3 ports)
