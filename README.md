@@ -5,7 +5,7 @@ It integrates these patch sets:
 - `klizas/aur`
 - `craigds/fix-vhci-port-change-notification` (including merged `AdityaGarg8` updates)
 - `clanoftheducks/clanoftheducks-aaudio-patch1`
-- `t2linux/apple-bce-drv#28` (audio timestamp and BCE reply-path fixes)
+- `deqrocks/audio-fix-pr` (audio timestamp and BCE reply-path fixes)
 
 Current status on my system: S3 suspend/resume appears to work (almost) reliably for me. I got a "desync" error once in ~40 suspend/resume cycles.
 
@@ -27,6 +27,5 @@ The project is divided into 3 main components:
 Please note that the `master` branch does not currently support system suspend and resume.
 
 If you want to support me, you can do so by donating to me on PayPal: https://paypal.me/mcmrarm
-
 
 
