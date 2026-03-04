@@ -423,7 +423,7 @@ static int __init apple_bce_module_init(void)
 {
     int result;
 
-    pr_info("apple-bce: local-merge-klizas-craigds-ducks active\n");
+    pr_info("apple-bce: local-merge-klizas-craigds-ducks-pr28 active\n");
 
     if ((result = alloc_chrdev_region(&bce_chrdev, 0, 1, "apple-bce")))
         goto fail_chrdev;
