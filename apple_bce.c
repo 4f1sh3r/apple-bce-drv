@@ -422,6 +422,8 @@ struct pci_driver apple_bce_pci_driver = {
 static int __init apple_bce_module_init(void)
 {
     int result;
+
+    pr_info("apple-bce: local-merge-klizas-pr23-deqrocks-pr28 active\n");
     if ((result = alloc_chrdev_region(&bce_chrdev, 0, 1, "apple-bce")))
         goto fail_chrdev;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)

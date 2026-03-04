@@ -1,3 +1,8 @@
+## Local Patch Integration (v2)
+This branch is based on upstream `t2linux/apple-bce-drv` (`origin/aur`) and carries only:
+- `klizas` PR #23
+- `deqrocks` PR #28
+
 # MacBook Bridge/T2 Linux Driver
 A driver for MacBook models 2018 and newer, implementing the VHCI (required for mouse/keyboard/etc.) and audio functionality.
 
